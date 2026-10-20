@@ -207,3 +207,44 @@ fn narrow_toolbar_reaches_collapsed_commands() {
     ]))
     .unwrap();
 }
+
+/// Save through the real dialog, not a direct engine call: typed refinement reaches the
+/// file picker callback and is remembered on the next opening, also after changing format.
+#[test]
+fn save_mesh_dialog_exports_and_remembers_surface_deviation() {
+    use serde_json::json;
+    let mut h = Harness::new();
+    h.run(&json!([
+        {"call":"engine.execute","params":{"command":"solid.cylinder","params":{"diameter":100,"height":20,"operation":"new","body_name":"Round"}}}
+    ]))
+    .unwrap();
+    let mut counts = Vec::new();
+    for value in ["0.5", "0.01"] {
+        h.run(&json!([
+            {"call":"engine.execute","params":{"command":"select.set","params":{"items":[{"type":"body","name":"Round"}]}}},
+            {"start":"file.save_mesh"},
+            {"click":{"handle":"dialog:Surface deviation (mm)"}},
+            {"key":"A","cmd":true}, {"text":value},
+            {"click":{"handle":"dialog:Save"}},
+            {"expect":{"dialog":null,"errors":0}}
+        ]))
+        .unwrap();
+        assert_eq!(h.app.preferences.save_mesh_surface_deviation, value);
+        let bytes = std::fs::read(h.dir.join("Round.stl")).unwrap();
+        counts.push(solidcraft_engine::io::read_stl(&bytes).unwrap().len());
+    }
+    assert!(counts[1] > counts[0]);
+    h.run(&json!([
+        {"call":"engine.execute","params":{"command":"select.set","params":{"items":[{"type":"body","name":"Round"}]}}},
+        {"start":"file.save_mesh"},
+        {"click":{"handle":"dialog:Format"}},
+        {"click":{"handle":"dialog:Format:3MF with face tags"}},
+        {"click":{"handle":"dialog:Save"}},
+        {"expect":{"dialog":null,"errors":0}}
+    ]))
+    .unwrap();
+    let bytes = std::fs::read(h.dir.join("Round.3mf")).unwrap();
+    let (objects, _) = solidcraft_engine::io::read_3mf(&bytes).unwrap();
+    assert_eq!(objects[0].triangles.len(), counts[1]);
+    assert_eq!(h.app.preferences.save_mesh_format, "3mf-tagged");
+}

@@ -44,6 +44,17 @@ a temporary folder and opens it in the chosen slicer instead of asking for a fil
 list shows the slicers found on the computer with their icons; **Custom…** adds any other program
 to the top of the list (kept between runs; hover an entry you added and press Delete to remove it).
 
+**Surface deviation (mm)** sets the chord tolerance of exported curved surfaces. Smaller values
+produce finer meshes and larger files. Graphics → Display quality controls the viewport separately.
+Leave the field empty for the existing automatic setting
+(0.0002 of each body's size, at least 0.001 mm). The last entry is remembered. The value is always
+in millimetres, independent of the design's units, and must be from 0.0001 to 1000 mm.
+Scripts can pass `surface_deviation: 0.01` to `file.save_mesh` or `file.export` for mesh formats
+(STL, ASCII STL, OBJ, 3MF and tagged 3MF). This reuses the existing mesher: its size-based safety
+floor (one millionth of the body's size) and subdivision limits still apply, so the setting is
+a refinement target rather than a certified error bound. Imported mesh bodies retain their
+existing triangles; the setting refines B-rep surfaces, not imported facets.
+
 Closed mechanical meshes with a constant cross-section can be rebuilt as solids with the
 `mesh.convert` command (command palette, scripts and the control channel).
 

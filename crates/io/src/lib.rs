@@ -335,9 +335,30 @@ impl Format {
     }
 }
 
+/// Mesh export refinement, independent of the display mesh and the design's units.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct MeshExportOptions {
+    /// Chord tolerance in millimetres. None keeps the size-based automatic tolerance.
+    pub surface_deviation: Option<f64>,
+}
+
+impl MeshExportOptions {
+    /// Bound user input before meshing; the kernel also retains its size-based safety floor.
+    pub fn validate(self) -> Result<()> {
+        if self.surface_deviation.is_some_and(|v| !v.is_finite() || !(1e-4..=1000.0).contains(&v)) {
+            return Err(IoError::Invalid("surface_deviation must be a number from 0.0001 to 1000 mm".into()));
+        }
+        Ok(())
+    }
+}
+
 /// Fine export mesh for a body (chord tolerance 2e-4 of its size).
 pub fn export_mesh(b: &solidcraft_kernel::Body) -> Result<Mesh> {
-    Ok(b.tessellate((b.size() * 2e-4).max(1e-3))?)
+    export_mesh_with_options(b, MeshExportOptions::default())
+}
+
+fn export_mesh_with_options(b: &solidcraft_kernel::Body, options: MeshExportOptions) -> Result<Mesh> {
+    Ok(b.tessellate(options.surface_deviation.unwrap_or_else(|| (b.size() * 2e-4).max(1e-3)))?)
 }
 
 /// Distance within which an exported mesh's vertices are welded (STL and 3MF alike).
@@ -443,6 +464,25 @@ fn threemf_metadata(meta: &Metadata) -> Vec<(&'static str, &str)> {
 /// STEP and IGES headers (author, organization; STEP also the description) and 3MF model
 /// metadata (project as the title, author as the designer, description, licence).
 pub fn export_with_metadata(state: &ModelState, bodies: &[String], format: Format, name: &str, meta: &Metadata) -> Result<Vec<u8>> {
+    export_with_mesh_options(state, bodies, format, name, meta, MeshExportOptions::default())
+}
+
+/// Export with optional mesh refinement. Non-mesh formats refuse an explicit deviation.
+/// Existing callers of [`export`] and [`export_with_metadata`] retain the automatic tolerance.
+pub fn export_with_mesh_options(
+    state: &ModelState,
+    bodies: &[String],
+    format: Format,
+    name: &str,
+    meta: &Metadata,
+    options: MeshExportOptions,
+) -> Result<Vec<u8>> {
+    options.validate()?;
+    if options.surface_deviation.is_some()
+        && !matches!(format, Format::StlBinary | Format::StlAscii | Format::Obj | Format::ThreeMf | Format::ThreeMfTagged)
+    {
+        return Err(IoError::Invalid("surface_deviation applies only to mesh formats".into()));
+    }
     let sel: Vec<&solidcraft_doc::ModelBody> = state.bodies.iter().filter(|b| bodies.is_empty() || bodies.contains(&b.name)).collect();
     if sel.is_empty() {
         return Err(IoError::Empty);
@@ -454,7 +494,7 @@ pub fn export_with_metadata(state: &ModelState, bodies: &[String], format: Forma
             let meshes: Vec<Mesh> = sel
                 .iter()
                 .map(|b| {
-                    let m = export_mesh(&b.body)?;
+                    let m = export_mesh_with_options(&b.body, options)?;
                     let (positions, triangles) = weld(&m.positions, &m.triangles, weld_eps(&b.body));
                     Ok(Mesh { positions, triangles, ..Mesh::default() })
                 })
@@ -462,7 +502,8 @@ pub fn export_with_metadata(state: &ModelState, bodies: &[String], format: Forma
             if format == Format::StlBinary { stl_binary(&meshes, name) } else { stl_ascii(&meshes, name).into_bytes() }
         }
         Format::Obj => {
-            let meshes: Vec<(String, Mesh)> = sel.iter().map(|b| Ok((b.name.clone(), export_mesh(&b.body)?))).collect::<Result<_>>()?;
+            let meshes: Vec<(String, Mesh)> =
+                sel.iter().map(|b| Ok((b.name.clone(), export_mesh_with_options(&b.body, options)?))).collect::<Result<_>>()?;
             obj(&meshes).into_bytes()
         }
         Format::Step => {
@@ -476,7 +517,7 @@ pub fn export_with_metadata(state: &ModelState, bodies: &[String], format: Forma
             solidcraft_kernel::iges_export_bodies(&bs, &step_header(format!("{name}.igs"), meta))?.into_bytes()
         }
         Format::ThreeMf | Format::ThreeMfTagged => {
-            let objs: Vec<MeshObject> = sel.iter().map(|b| mesh_object(b, format == Format::ThreeMfTagged)).collect::<Result<_>>()?;
+            let objs: Vec<MeshObject> = sel.iter().map(|b| mesh_object(b, format == Format::ThreeMfTagged, options)).collect::<Result<_>>()?;
             write_3mf_with(&objs, &threemf_metadata(meta))?
         }
         Format::Design => return Err(IoError::Format("solidcraft (save the document instead)".into())),
@@ -486,8 +527,8 @@ pub fn export_with_metadata(state: &ModelState, bodies: &[String], format: Forma
 
 /// A body as a 3MF mesh: welded watertight (T-junctions split), coloured, and with `tagged`
 /// each triangle keeps the B-rep face it came from.
-fn mesh_object(b: &solidcraft_doc::ModelBody, tagged: bool) -> Result<MeshObject> {
-    let m = export_mesh(&b.body)?;
+fn mesh_object(b: &solidcraft_doc::ModelBody, tagged: bool, options: MeshExportOptions) -> Result<MeshObject> {
+    let m = export_mesh_with_options(&b.body, options)?;
     let eps = weld_eps(&b.body);
     // Faces with colours of their own tag their triangles.
     let paint = b.body.paint();
@@ -1061,5 +1102,38 @@ mod tests {
         let mut xml = String::new();
         zip.by_name("3D/3dmodel.model").unwrap().read_to_string(&mut xml).unwrap();
         assert!(!xml.contains("ft:"));
+        // A custom deviation must keep the same face tags and full-precision coordinates.
+        let mut counts = Vec::new();
+        for deviation in [0.5, 0.01] {
+            let options = MeshExportOptions { surface_deviation: Some(deviation) };
+            let bytes = export_with_mesh_options(&st, &[], Format::ThreeMfTagged, "t", &Metadata::default(), options).unwrap();
+            let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+            let mut xml = String::new();
+            zip.by_name("3D/3dmodel.model").unwrap().read_to_string(&mut xml).unwrap();
+            let triangles: Vec<_> = xml.lines().filter(|l| l.trim_start().starts_with("<triangle ")).collect();
+            let tags: std::collections::HashSet<usize> = triangles.iter().map(|l| attr(l, "ft:face") as usize).collect();
+            assert!(xml.contains(&format!("ft:faces=\"{faces}\"")));
+            assert_eq!(tags, (0..faces).collect(), "every B-rep face is still tagged at {deviation} mm");
+            let mesh = export_mesh_with_options(body, options).unwrap();
+            let exact: std::collections::HashSet<_> = mesh.positions.iter().flat_map(|p| [p.x, p.y, p.z]).map(|v| (v + 0.0).to_bits()).collect();
+            for line in xml.lines().filter(|l| l.trim_start().starts_with("<vertex ")) {
+                for key in ["x", "y", "z"] {
+                    assert!(exact.contains(&attr(line, key).to_bits()), "{line}");
+                }
+            }
+            counts.push(triangles.len());
+        }
+        assert!(counts[1] > counts[0], "the fillet gets a finer mesh: {counts:?}");
+    }
+
+    #[test]
+    fn surface_deviation_rejects_nonfinite_and_out_of_range_values() {
+        assert!(MeshExportOptions::default().validate().is_ok());
+        for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -1.0, 0.0, 1e-5, 1001.0] {
+            assert!(MeshExportOptions { surface_deviation: Some(value) }.validate().is_err());
+        }
+        for value in [1e-4, 0.01, 1000.0] {
+            assert!(MeshExportOptions { surface_deviation: Some(value) }.validate().is_ok());
+        }
     }
 }

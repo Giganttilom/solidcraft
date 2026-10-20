@@ -362,6 +362,8 @@ pub struct Prefs {
     /// Save as mesh: the last format (`stl` or `3mf`), whether it was sent to a slicer, which one
     /// (an installed slicer's id or a program path), and the programs the user added (newest first).
     pub save_mesh_format: String,
+    /// Save as mesh chord tolerance in mm; empty uses automatic refinement.
+    pub save_mesh_surface_deviation: String,
     /// Hidden edges in the current-view DXF export (false: omit, true: dashed).
     pub view_dxf_dashed: bool,
     /// Model-space chord tolerance for current-view DXF curves, in millimetres.
@@ -487,6 +489,7 @@ impl Default for Prefs {
             check_updates: true,
             update: crate::update::Memo::default(),
             save_mesh_format: "stl".into(),
+            save_mesh_surface_deviation: String::new(),
             view_dxf_dashed: false,
             view_dxf_tolerance: 0.01,
             save_mesh_send: false,

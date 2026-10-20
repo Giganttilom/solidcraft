@@ -32,6 +32,8 @@ const MAX_CUSTOM: usize = 24;
 pub struct SaveMesh {
     format: usize,
     send: bool,
+    /// Empty keeps automatic refinement; otherwise a chord tolerance in mm.
+    surface_deviation: String,
     /// The chosen slicer: an installed one's id, or the path of one the user added.
     slicer: String,
     /// The slicer list has not been read for this opening yet.
@@ -82,7 +84,13 @@ pub fn start(app: &SolveApp, id: &str) -> Option<(Kind, Vec<SelInput>)> {
     }
     let p = &app.preferences;
     let format = FORMATS.iter().position(|f| f.1 == p.save_mesh_format).unwrap_or(0);
-    let kind = Kind::SaveMesh(SaveMesh { format, send: p.save_mesh_send, slicer: p.save_mesh_slicer.clone(), stale: true });
+    let kind = Kind::SaveMesh(SaveMesh {
+        format,
+        send: p.save_mesh_send,
+        surface_deviation: p.save_mesh_surface_deviation.clone(),
+        slicer: p.save_mesh_slicer.clone(),
+        stale: true,
+    });
     Some((kind, vec![SelInput::new("Bodies", BODIES, true)]))
 }
 
@@ -148,10 +156,17 @@ pub fn rows(app: &mut SolveApp, ui: &mut egui::Ui, k: &mut SaveMesh) -> bool {
     combo(ui, "sm_format", &FORMATS.map(|f| f.0), &mut k.format);
     ui.end_row();
 
+    row_label(ui, "Surface deviation (mm)");
+    let enter = crate::dialogs::field(ui, &mut k.surface_deviation);
+    ui.end_row();
+    row_label(ui, "");
+    ui.label(crate::i18n::tr("ui.mesh_deviation_hint"));
+    ui.end_row();
+
     // A browser has no installed programs to send a file to.
     if app.services.pick_program.is_none() {
         k.send = false;
-        return false;
+        return enter;
     }
     row_label(ui, "Send to slicer");
     ui.checkbox(&mut k.send, "");
@@ -167,7 +182,7 @@ pub fn rows(app: &mut SolveApp, ui: &mut egui::Ui, k: &mut SaveMesh) -> bool {
     let choosing = app.file_picker_busy();
     ui.add_enabled_ui(k.send && !choosing, |ui| slicer_combo(app, ui, k));
     ui.end_row();
-    false
+    enter
 }
 
 fn slicer_combo(app: &mut SolveApp, ui: &mut egui::Ui, k: &mut SaveMesh) {
@@ -278,6 +293,13 @@ fn bodies(inputs: &[SelInput]) -> Vec<String> {
 pub fn commands(k: &SaveMesh, inputs: &[SelInput]) -> Result<Vec<(String, Value)>, String> {
     let format = FORMATS.get(k.format).map_or("stl", |f| f.1);
     let mut p = json!({ "format": format });
+    if !k.surface_deviation.trim().is_empty() {
+        let deviation =
+            crate::prefs::parse_number(k.surface_deviation.trim()).ok_or_else(|| crate::i18n::tr("ui.mesh_deviation_invalid").to_string())?;
+        let options = solidcraft_engine::io::MeshExportOptions { surface_deviation: Some(deviation) };
+        options.validate().map_err(|_| crate::i18n::tr("ui.mesh_deviation_invalid").to_string())?;
+        p["surface_deviation"] = json!(deviation);
+    }
     let names = bodies(inputs);
     if names.is_empty() {
         return Err(crate::i18n::tr("ui.save_mesh_pick_bodies").into());
@@ -310,6 +332,7 @@ pub fn run(app: &mut SolveApp, k: &SaveMesh, inputs: &[SelInput]) -> Result<(), 
     let name = bodies(inputs).first().cloned().unwrap_or_else(|| app.session.doc.name.clone());
     let p = &mut app.preferences;
     p.save_mesh_format = format.into();
+    p.save_mesh_surface_deviation = k.surface_deviation.clone();
     p.save_mesh_send = k.send;
     if !k.slicer.is_empty() {
         p.save_mesh_slicer = k.slicer.clone();
@@ -343,5 +366,35 @@ fn save(app: &mut SolveApp, mut params: Value, path: &str) {
             Some(s) => app.set_status(crate::i18n::format("ui.sent_to_slicer", &[("slicer", s)]), false),
             None => app.set_status(crate::i18n::format("ui.saved_to", &[("path", path)]), false),
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dialog_passes_refinement_and_keeps_format_bodies_and_slicer() {
+        let mut app = SolveApp::new(solidcraft_engine::Session::default(), crate::Services::default());
+        app.preferences.save_mesh_surface_deviation = "0,01".into();
+        let (Kind::SaveMesh(mut k), mut inputs) = start(&app, "file.save_mesh").unwrap() else { panic!("wrong dialog") };
+        inputs[0].items.push(Sel::Body { name: "Round".into() });
+        for (format, (_, expected, _)) in FORMATS.iter().enumerate() {
+            k.format = format;
+            k.send = true;
+            k.slicer = "test-slicer".into();
+            let cmds = commands(&k, &inputs).unwrap();
+            assert_eq!(cmds[0].1, json!({"format":expected,"bodies":["Round"],"slicer":"test-slicer","surface_deviation":0.01}));
+        }
+        k.surface_deviation.clear();
+        assert!(commands(&k, &inputs).unwrap()[0].1.get("surface_deviation").is_none());
+        for invalid in ["0", "-0.1", "NaN", "inf", "1e100", "abc", "0.00001", "1001"] {
+            k.surface_deviation = invalid.into();
+            assert!(commands(&k, &inputs).is_err(), "{invalid}");
+        }
+        for boundary in ["0.0001", "1000"] {
+            k.surface_deviation = boundary.into();
+            assert!(commands(&k, &inputs).is_ok());
+        }
     }
 }

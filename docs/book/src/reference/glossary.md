@@ -302,6 +302,17 @@ a standard size.
 - **Elsewhere:** standard part, library part, fastener, catalogue part.
 - **For translators:** see *Words with more than one meaning*, "part".
 
+### surface deviation
+
+The target distance between an exported mesh's facets and the curved surface they approximate.
+
+Smaller values produce finer meshes. Meshing safety floors and subdivision limits still apply.
+This setting does not subdivide imported mesh facets.
+
+- **In SolidCraft:** the Save as mesh dialog; `surface_deviation` in `file.save_mesh` and mesh `file.export` commands, in millimetres.
+- **Elsewhere:** chord tolerance, chordal deviation.
+- **For translators:** a geometric distance, not a surface angle or display quality.
+
 ### timeline
 
 The ordered list of a design's features, which SolidCraft computes from first to last.
